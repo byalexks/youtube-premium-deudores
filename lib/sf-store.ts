@@ -1,4 +1,4 @@
-import { kv } from "@vercel/kv";
+import { createClient } from "@vercel/kv";
 
 const IS_DEV = process.env.NODE_ENV === "development";
 
@@ -25,17 +25,24 @@ const memStore: Record<string, unknown> = {};
 function memGet<T>(key: string): T | null { return (memStore[key] as T) ?? null; }
 function memSet(key: string, val: unknown) { memStore[key] = val; }
 
-const KV_ENABLED = !IS_DEV && !!process.env.KV_REST_API_URL && !!process.env.KV_REST_API_TOKEN;
+function getKV() {
+  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "";
+  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "";
+  if (!IS_DEV && url.startsWith("https://") && token) return createClient({ url, token });
+  return null;
+}
 
 function miembrosKey(year: number) { return `sf:year:${year}:miembros`; }
 function pendientesKey(year: number) { return `sf:year:${year}:pendientes`; }
 
 async function kvGet<T>(key: string): Promise<T | null> {
-  if (KV_ENABLED) return kv.get<T>(key);
+  const client = getKV();
+  if (client) return client.get<T>(key);
   return memGet<T>(key);
 }
 async function kvSet(key: string, val: unknown) {
-  if (KV_ENABLED) return kv.set(key, val);
+  const client = getKV();
+  if (client) return client.set(key, val);
   memSet(key, val);
 }
 
