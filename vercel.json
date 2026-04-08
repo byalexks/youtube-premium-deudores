@@ -1,0 +1,9 @@
+{
+  "redirects": [
+    {
+      "source": "/_admin",
+      "destination": "/admin",
+      "permanent": true
+    }
+  ]
+}
