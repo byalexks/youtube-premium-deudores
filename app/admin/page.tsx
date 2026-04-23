@@ -11,8 +11,10 @@ type PagoPendiente = {
   status: PagoPendienteStatus;
 };
 
+type Miembro = { nombre: string; ultimoPago: string; telefono: string };
+
 type AdminYearPayload = {
-  miembros: { nombre: string; ultimoPago: string }[];
+  miembros: Miembro[];
   pendientes: PagoPendiente[];
 };
 
@@ -29,8 +31,39 @@ type MemberAccounting = {
   totalAportado: number;
 };
 
+type PhoneUpdatePayload = { ok: boolean; miembro: Miembro };
+
 const CUOTA = 13000;
 const MESES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
+
+const getMesLabel = (year: number, month: number) => `${MESES[month]} ${year}`;
+
+const generarMeses = (startYear: number, startMonth: number, endYear: number, endMonth: number) => {
+  const meses: string[] = [];
+  let y = startYear;
+  let m = startMonth;
+  while (y < endYear || (y === endYear && m <= endMonth)) {
+    meses.push(getMesLabel(y, m));
+    m += 1;
+    if (m > 11) {
+      m = 0;
+      y += 1;
+    }
+  }
+  return meses;
+};
+
+const calcularPendientes = (ultimoPago: string, endYear: number, endMonth: number) => {
+  const parsed = parseMesLabel(ultimoPago);
+  let startMonth = parsed.month + 1;
+  let startYear = parsed.year;
+  if (startMonth > 11) {
+    startMonth = 0;
+    startYear += 1;
+  }
+  if (parsed.year > endYear || (parsed.year === endYear && parsed.month >= endMonth)) return [];
+  return generarMeses(startYear, startMonth, endYear, endMonth);
+};
 
 const formatCOP = (value: number) =>
   new Intl.NumberFormat("es-CO", {
@@ -73,6 +106,16 @@ async function apiReject(year: number, requestId: string, token: string) {
   if (!res.ok) throw new Error("Reject failed");
 }
 
+async function apiUpdatePhone(year: number, nombre: string, telefono: string, token: string) {
+  const res = await fetch("/api/members/phone", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ year, nombre, telefono, token }),
+  });
+  if (!res.ok) throw new Error("Phone update failed");
+  return (await res.json()) as PhoneUpdatePayload;
+}
+
 export default function AdminPage() {
   const [token, setToken] = useState<string>("");
   const [year, setYear] = useState<number>(() => new Date().getFullYear());
@@ -80,6 +123,8 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [editingPhone, setEditingPhone] = useState<Record<string, string>>({});
+  const [savingPhoneName, setSavingPhoneName] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const reloadRef = useRef<() => Promise<void>>(async () => undefined);
 
@@ -135,6 +180,26 @@ export default function AdminPage() {
     };
   }, [data, year]);
 
+  const pendientesPorMiembro = useMemo(() => {
+    const currentMonth = new Date().getMonth();
+    const result = new Map<string, string[]>();
+    (data?.miembros ?? []).forEach((m) => {
+      result.set(m.nombre, calcularPendientes(m.ultimoPago, year, currentMonth));
+    });
+    return result;
+  }, [data, year]);
+
+  useEffect(() => {
+    if (!data?.miembros) return;
+    setEditingPhone((prev) => {
+      const next: Record<string, string> = { ...prev };
+      data.miembros.forEach((m) => {
+        if (!(m.nombre in next)) next[m.nombre] = m.telefono ?? "";
+      });
+      return next;
+    });
+  }, [data]);
+
   const showToast = (msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(null), 2500);
@@ -162,7 +227,6 @@ export default function AdminPage() {
 
   useEffect(() => {
     void reloadRef.current();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [year, token]);
 
   useEffect(() => {
@@ -197,6 +261,37 @@ export default function AdminPage() {
     setBusyId(null);
     showToast("Rechazado");
     await reload().catch(() => undefined);
+  };
+
+  const onSavePhone = async (nombre: string) => {
+    if (!token) return;
+    const telefono = editingPhone[nombre] ?? "";
+    setSavingPhoneName(nombre);
+    try {
+      await apiUpdatePhone(year, nombre, telefono, token);
+      showToast("Teléfono actualizado");
+      await reload();
+    } catch {
+      showToast("Error guardando teléfono");
+    } finally {
+      setSavingPhoneName(null);
+    }
+  };
+
+  const onRemind = (miembro: Miembro) => {
+    const telefono = (miembro.telefono ?? "").replace(/[^0-9]/g, "");
+    if (!telefono) {
+      showToast("Este miembro no tiene teléfono");
+      return;
+    }
+    const meses = pendientesPorMiembro.get(miembro.nombre) ?? [];
+    if (meses.length === 0) {
+      showToast("Este miembro está al día");
+      return;
+    }
+    const total = meses.length * CUOTA;
+    const texto = `Hola ${miembro.nombre}, te recordamos los meses pendientes: ${meses.join(", ")}. Total adeudado: ${formatCOP(total)}. Gracias.`;
+    window.open(`https://wa.me/${telefono}?text=${encodeURIComponent(texto)}`, "_blank");
   };
 
   const exportAccountingCsv = () => {
@@ -321,6 +416,51 @@ export default function AdminPage() {
               ))}
             </div>
           )}
+        </div>
+
+        <div style={styles.section}>
+          <div style={styles.sectionHeader}>
+            <h2 style={styles.h2}>Recordatorios</h2>
+          </div>
+          <div style={styles.list}>
+            {(data?.miembros ?? []).map((m) => {
+              const meses = pendientesPorMiembro.get(m.nombre) ?? [];
+              const total = meses.length * CUOTA;
+              return (
+                <div key={m.nombre} className="adm-item">
+                  <div style={styles.itemMain}>
+                    <div style={styles.itemName}>{m.nombre}</div>
+                    <div style={styles.itemMeta}>
+                      Pendiente: {meses.length > 0 ? meses.join(", ") : "Al día"}
+                    </div>
+                    <div style={styles.itemMeta}>Total: {formatCOP(total)}</div>
+                  </div>
+                  <div className="adm-actions">
+                    <input
+                      style={styles.inputPhone}
+                      value={editingPhone[m.nombre] ?? ""}
+                      onChange={(e) => setEditingPhone((prev) => ({ ...prev, [m.nombre]: e.target.value }))}
+                      placeholder="573001112233"
+                    />
+                    <button
+                      style={{ ...styles.btn, ...styles.btnSave }}
+                      onClick={() => void onSavePhone(m.nombre)}
+                      disabled={savingPhoneName === m.nombre || loading}
+                    >
+                      {savingPhoneName === m.nombre ? "..." : "Guardar"}
+                    </button>
+                    <button
+                      style={{ ...styles.btn, ...styles.btnWarn }}
+                      onClick={() => onRemind(m)}
+                      disabled={loading}
+                    >
+                      Recordar
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
 
         <div style={styles.section}>
@@ -491,6 +631,17 @@ const styles: Record<string, React.CSSProperties> = {
   },
   btnApprove: { background: "#E50914", color: "#fff" },
   btnReject: { background: "rgba(245,158,11,0.18)", color: "#f59e0b", border: "1px solid rgba(245,158,11,0.25)" },
+  btnSave: { background: "rgba(59,130,246,0.25)", color: "#93c5fd", border: "1px solid rgba(59,130,246,0.35)" },
+  btnWarn: { background: "rgba(16,185,129,0.2)", color: "#34d399", border: "1px solid rgba(16,185,129,0.35)" },
+  inputPhone: {
+    background: "rgba(0,0,0,0.4)",
+    border: "1px solid rgba(255,255,255,0.14)",
+    borderRadius: "10px",
+    padding: "10px 12px",
+    color: "#e6edf3",
+    outline: "none",
+    minWidth: "150px",
+  },
   exportBtn: {
     border: "1px solid rgba(255,255,255,0.14)",
     borderRadius: "10px",

@@ -2,7 +2,7 @@ import { createClient } from "@vercel/kv";
 
 const IS_DEV = process.env.NODE_ENV === "development";
 
-export type Miembro = { nombre: string; ultimoPago: string };
+export type Miembro = { nombre: string; ultimoPago: string; telefono: string };
 export type PagoPendienteStatus = "pending" | "approved" | "rejected";
 export type PagoPendiente = {
   id: string;
@@ -13,11 +13,11 @@ export type PagoPendiente = {
 };
 
 const INITIAL_DATA: Miembro[] = [
-  { nombre: "MAGB MAIKOLCHIS", ultimoPago: "Mar 2026" },
-  { nombre: "Arianis Arrieta", ultimoPago: "Mar 2026" },
-  { nombre: "Dylan Batista", ultimoPago: "Mar 2026" },
-  { nombre: "Michael Martinez", ultimoPago: "Mar 2026" },
-  { nombre: "Wendy Ortega", ultimoPago: "Mar 2026" },
+  { nombre: "MAGB MAIKOLCHIS", ultimoPago: "Mar 2026", telefono: "" },
+  { nombre: "Arianis Arrieta", ultimoPago: "Mar 2026", telefono: "" },
+  { nombre: "Dylan Batista", ultimoPago: "Mar 2026", telefono: "" },
+  { nombre: "Michael Martinez", ultimoPago: "Mar 2026", telefono: "" },
+  { nombre: "Wendy Ortega", ultimoPago: "Mar 2026", telefono: "" },
 ];
 
 // In-memory store for local development (resets on server restart)
@@ -60,8 +60,11 @@ export async function getYearData(year: number) {
     kvGet<Miembro[]>(miembrosKey(year)),
     kvGet<PagoPendiente[]>(pendientesKey(year)),
   ]);
+  const normalizedMiembros = Array.isArray(miembros)
+    ? miembros.map((m) => ({ ...m, telefono: typeof m.telefono === "string" ? m.telefono : "" }))
+    : [];
   return {
-    miembros: Array.isArray(miembros) ? miembros : [],
+    miembros: normalizedMiembros,
     pendientes: Array.isArray(pendientes) ? pendientes : [],
   };
 }
@@ -98,7 +101,9 @@ export async function applyPagoToMiembroIfNewer(
 ) {
   await ensureSeedForYear(year);
   const current = (await kvGet<Miembro[]>(miembrosKey(year))) ?? [];
-  const miembros = Array.isArray(current) ? current : [];
+  const miembros = Array.isArray(current)
+    ? current.map((m) => ({ ...m, telefono: typeof m.telefono === "string" ? m.telefono : "" }))
+    : [];
   const idx = miembros.findIndex((m) => m.nombre === nombre);
   if (idx === -1) return null;
 
@@ -110,5 +115,19 @@ export async function applyPagoToMiembroIfNewer(
   miembros[idx] = next;
   await kvSet(miembrosKey(year), miembros);
   return next;
+}
+
+export async function updateMiembroTelefono(year: number, nombre: string, telefono: string) {
+  await ensureSeedForYear(year);
+  const current = (await kvGet<Miembro[]>(miembrosKey(year))) ?? [];
+  const miembros = Array.isArray(current)
+    ? current.map((m) => ({ ...m, telefono: typeof m.telefono === "string" ? m.telefono : "" }))
+    : [];
+  const idx = miembros.findIndex((m) => m.nombre === nombre);
+  if (idx === -1) return null;
+  const updated = { ...miembros[idx]!, telefono };
+  miembros[idx] = updated;
+  await kvSet(miembrosKey(year), miembros);
+  return updated;
 }
 
