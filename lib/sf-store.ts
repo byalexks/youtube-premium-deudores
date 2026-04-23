@@ -10,6 +10,22 @@ export type PagoPendiente = {
   mes: string;
   createdAt: string;
   status: PagoPendienteStatus;
+  comprobanteUrl?: string;
+  comprobanteNombre?: string;
+};
+
+export type CorteConfig = {
+  day: number;
+  destino: string;
+};
+
+export type CorteSnapshot = {
+  year: number;
+  generatedAt: string;
+  corteMes: string;
+  totalDeuda: number;
+  morosos: Array<{ nombre: string; meses: string[]; total: number }>;
+  message: string;
 };
 
 const INITIAL_DATA: Miembro[] = [
@@ -34,6 +50,8 @@ function getKV() {
 
 function miembrosKey(year: number) { return `sf:year:${year}:miembros`; }
 function pendientesKey(year: number) { return `sf:year:${year}:pendientes`; }
+const corteConfigKey = "sf:corte:config";
+const corteSnapshotKey = "sf:corte:last";
 
 async function kvGet<T>(key: string): Promise<T | null> {
   const client = getKV();
@@ -44,6 +62,53 @@ async function kvSet(key: string, val: unknown) {
   const client = getKV();
   if (client) return client.set(key, val);
   memSet(key, val);
+}
+
+const MESES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
+
+function parseMesLabel(label: string) {
+  const [mesRaw, yearRaw] = label.trim().split(/\s+/);
+  return { month: MESES.indexOf(mesRaw ?? ""), year: Number(yearRaw) };
+}
+
+function getMesLabel(year: number, month: number) {
+  return `${MESES[month]} ${year}`;
+}
+
+function generarMeses(startYear: number, startMonth: number, endYear: number, endMonth: number) {
+  const meses: string[] = [];
+  let y = startYear;
+  let m = startMonth;
+  while (y < endYear || (y === endYear && m <= endMonth)) {
+    meses.push(getMesLabel(y, m));
+    m += 1;
+    if (m > 11) {
+      m = 0;
+      y += 1;
+    }
+  }
+  return meses;
+}
+
+function calcularPendientes(ultimoPago: string, endYear: number, endMonth: number) {
+  const parsed = parseMesLabel(ultimoPago);
+  let startMonth = parsed.month + 1;
+  let startYear = parsed.year;
+  if (startMonth > 11) {
+    startMonth = 0;
+    startYear += 1;
+  }
+  if (parsed.year > endYear || (parsed.year === endYear && parsed.month >= endMonth)) return [];
+  return generarMeses(startYear, startMonth, endYear, endMonth);
+}
+
+function formatCOP(value: number) {
+  return new Intl.NumberFormat("es-CO", {
+    style: "currency",
+    currency: "COP",
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  }).format(value);
 }
 
 export async function ensureSeedForYear(year: number) {
@@ -63,9 +128,16 @@ export async function getYearData(year: number) {
   const normalizedMiembros = Array.isArray(miembros)
     ? miembros.map((m) => ({ ...m, telefono: typeof m.telefono === "string" ? m.telefono : "" }))
     : [];
+  const normalizedPendientes = Array.isArray(pendientes)
+    ? pendientes.map((p) => ({
+      ...p,
+      comprobanteUrl: typeof p.comprobanteUrl === "string" ? p.comprobanteUrl : undefined,
+      comprobanteNombre: typeof p.comprobanteNombre === "string" ? p.comprobanteNombre : undefined,
+    }))
+    : [];
   return {
     miembros: normalizedMiembros,
-    pendientes: Array.isArray(pendientes) ? pendientes : [],
+    pendientes: normalizedPendientes,
   };
 }
 
@@ -131,3 +203,112 @@ export async function updateMiembroTelefono(year: number, nombre: string, telefo
   return updated;
 }
 
+export async function addMiembro(year: number, miembro: Miembro) {
+  await ensureSeedForYear(year);
+  const current = (await kvGet<Miembro[]>(miembrosKey(year))) ?? [];
+  const miembros = Array.isArray(current)
+    ? current.map((m) => ({ ...m, telefono: typeof m.telefono === "string" ? m.telefono : "" }))
+    : [];
+  if (miembros.some((m) => m.nombre === miembro.nombre)) return null;
+  miembros.push(miembro);
+  await kvSet(miembrosKey(year), miembros);
+  return miembro;
+}
+
+export async function updateMiembro(year: number, originalNombre: string, next: Miembro) {
+  await ensureSeedForYear(year);
+  const current = (await kvGet<Miembro[]>(miembrosKey(year))) ?? [];
+  const miembros = Array.isArray(current)
+    ? current.map((m) => ({ ...m, telefono: typeof m.telefono === "string" ? m.telefono : "" }))
+    : [];
+  const idx = miembros.findIndex((m) => m.nombre === originalNombre);
+  if (idx === -1) return null;
+  if (next.nombre !== originalNombre && miembros.some((m) => m.nombre === next.nombre)) return "duplicate";
+  miembros[idx] = next;
+  await kvSet(miembrosKey(year), miembros);
+
+  if (next.nombre !== originalNombre) {
+    const pendingCurrent = (await kvGet<PagoPendiente[]>(pendientesKey(year))) ?? [];
+    const pendings = Array.isArray(pendingCurrent)
+      ? pendingCurrent.map((p) => (p.nombre === originalNombre ? { ...p, nombre: next.nombre } : p))
+      : [];
+    await kvSet(pendientesKey(year), pendings);
+  }
+
+  return next;
+}
+
+export async function removeMiembro(year: number, nombre: string) {
+  await ensureSeedForYear(year);
+  const current = (await kvGet<Miembro[]>(miembrosKey(year))) ?? [];
+  const miembros = Array.isArray(current)
+    ? current.map((m) => ({ ...m, telefono: typeof m.telefono === "string" ? m.telefono : "" }))
+    : [];
+  const filtered = miembros.filter((m) => m.nombre !== nombre);
+  if (filtered.length === miembros.length) return false;
+  await kvSet(miembrosKey(year), filtered);
+  return true;
+}
+
+export async function getCorteConfig() {
+  const current = await kvGet<CorteConfig>(corteConfigKey);
+  const dayRaw = current?.day;
+  const destinoRaw = current?.destino;
+  const day = typeof dayRaw === "number" && Number.isFinite(dayRaw) ? Math.max(1, Math.min(31, Math.floor(dayRaw))) : 5;
+  const destino = typeof destinoRaw === "string" ? destinoRaw : "";
+  return { day, destino } satisfies CorteConfig;
+}
+
+export async function setCorteConfig(config: CorteConfig) {
+  const next: CorteConfig = {
+    day: Math.max(1, Math.min(31, Math.floor(config.day))),
+    destino: config.destino,
+  };
+  await kvSet(corteConfigKey, next);
+  return next;
+}
+
+export async function getLastCorteSnapshot() {
+  const snap = await kvGet<CorteSnapshot>(corteSnapshotKey);
+  if (!snap || typeof snap !== "object") return null;
+  return snap;
+}
+
+export async function setLastCorteSnapshot(snapshot: CorteSnapshot) {
+  await kvSet(corteSnapshotKey, snapshot);
+  return snapshot;
+}
+
+export async function buildCorteSnapshot(year: number, month: number) {
+  const data = await getYearData(year);
+  const corteMes = getMesLabel(year, month);
+  const morosos = data.miembros
+    .map((m) => {
+      const meses = calcularPendientes(m.ultimoPago, year, month);
+      return { nombre: m.nombre, meses, total: meses.length * 13000 };
+    })
+    .filter((m) => m.meses.length > 0);
+  const totalDeuda = morosos.reduce((sum, m) => sum + m.total, 0);
+
+  let message = `▶️ *YouTube Premium Familiar — Corte automático*\n📅 Corte: ${corteMes}\n\n`;
+  if (morosos.length === 0) {
+    message += "No hay pagos pendientes. Todos están al día.";
+  } else {
+    message += "⚠️ *Morosos del corte:*\n";
+    morosos.forEach((m) => {
+      message += `\n👤 *${m.nombre}*\n`;
+      message += `   📌 Meses: ${m.meses.join(", ")}\n`;
+      message += `   💸 Total: ${formatCOP(m.total)}\n`;
+    });
+    message += `\n💰 *Total adeudado: ${formatCOP(totalDeuda)}*`;
+  }
+
+  return {
+    year,
+    generatedAt: new Date().toISOString(),
+    corteMes,
+    totalDeuda,
+    morosos,
+    message,
+  } satisfies CorteSnapshot;
+}

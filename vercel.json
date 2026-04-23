@@ -5,5 +5,11 @@
       "destination": "/admin",
       "permanent": true
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/corte",
+      "schedule": "0 12 * * *"
+    }
   ]
 }
