@@ -13,12 +13,16 @@ export async function GET(
   }
 
   const data = await getYearData(year);
-  const { searchParams } = new URL(req.url);
-  const token = searchParams.get("token");
-  const isAdmin = !!token && token === process.env.ADMIN_TOKEN;
+  const auth = req.headers.get("authorization") ?? "";
+  const hasAuthHeader = auth.startsWith("Bearer ");
+  const token = hasAuthHeader ? auth.slice(7).trim() : "";
+
+  if (hasAuthHeader && token !== process.env.ADMIN_TOKEN) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
 
   return NextResponse.json(
-    isAdmin ? { miembros: data.miembros, pendientes: data.pendientes } : { miembros: data.miembros },
+    hasAuthHeader ? { miembros: data.miembros, pendientes: data.pendientes } : { miembros: data.miembros },
     { status: 200 },
   );
 }
