@@ -5,7 +5,16 @@ import { useEffect, useMemo, useState } from "react";
 const CUOTA = 13000;
 
 type PagoPendienteStatus = "pending" | "approved" | "rejected";
-type PagoPendiente = { id: string; nombre: string; mes: string; createdAt: string; status: PagoPendienteStatus };
+type PagoPendiente = {
+  id: string;
+  nombre: string;
+  mes: string;
+  createdAt: string;
+  status: PagoPendienteStatus;
+  comprobanteUrl?: string;
+  comprobanteNombre?: string;
+};
+
 type Miembro = { nombre: string; ultimoPago: string; telefono: string };
 type YearPayload = { miembros: Miembro[]; pendientes?: PagoPendiente[] };
 
@@ -112,7 +121,13 @@ async function apiGetHistory(year: number, nombre: string): Promise<PagoPendient
   return Array.isArray(payload.history) ? payload.history : [];
 }
 
-async function apiRequestPayment(payload: { year: number; nombre: string; mes: string }) {
+async function apiRequestPayment(payload: {
+  year: number;
+  nombre: string;
+  mes: string;
+  comprobanteUrl?: string;
+  comprobanteNombre?: string;
+}) {
   const res = await fetch("/api/payments/request", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -145,6 +160,7 @@ export default function YoutubePremiumTracker() {
   const [loaded, setLoaded] = useState(false);
   const [requesting, setRequesting] = useState<Set<string>>(new Set());
   const [visibleCols, setVisibleCols] = useState<Set<ColKey>>(new Set(ALL_COLS));
+  const [comprobanteByMember, setComprobanteByMember] = useState<Record<string, { nombre: string; url: string } | null>>({});
 
   const toggleCol = (col: ColKey) => {
     if (col === "nombre" || col === "accion") return;
@@ -236,9 +252,16 @@ export default function YoutubePremiumTracker() {
     const nombre = miembros[idx]?.nombre;
     if (!nombre) return;
     const key = `${nombre}|${mes}`;
+    const comprobante = comprobanteByMember[nombre] ?? null;
     try {
       setRequesting((prev) => new Set(prev).add(key));
-      await apiRequestPayment({ year, nombre, mes });
+      await apiRequestPayment({
+        year,
+        nombre,
+        mes,
+        comprobanteUrl: comprobante?.url,
+        comprobanteNombre: comprobante?.nombre,
+      });
       showToast(`Solicitud enviada: ${nombre} — ${mes}`);
       abrirWhatsAppAdmin(nombre, mes);
     } catch {
@@ -278,6 +301,19 @@ export default function YoutubePremiumTracker() {
     } catch {
       showToast("Error al copiar");
     }
+  };
+
+  const onSelectComprobante = (nombre: string, file: File | null) => {
+    if (!file) {
+      setComprobanteByMember((prev) => ({ ...prev, [nombre]: null }));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === "string" ? reader.result : "";
+      setComprobanteByMember((prev) => ({ ...prev, [nombre]: { nombre: file.name, url: dataUrl } }));
+    };
+    reader.readAsDataURL(file);
   };
 
   const resetData = async () => {
@@ -427,6 +463,15 @@ export default function YoutubePremiumTracker() {
                       {m.mesesPendientes.length > 0 ? (
                         editIdx === i ? (
                           <div style={styles.payOptions}>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              style={styles.fileInput}
+                              onChange={(e) => onSelectComprobante(m.nombre, e.target.files?.[0] ?? null)}
+                            />
+                            {comprobanteByMember[m.nombre]?.nombre && (
+                              <span style={styles.fileName}>{comprobanteByMember[m.nombre]?.nombre}</span>
+                            )}
                             {m.mesesPendientes.map((mes) => {
                               const key = `${m.nombre}|${mes}`;
                               const isBusy = requesting.has(key);
@@ -510,6 +555,15 @@ export default function YoutubePremiumTracker() {
                       {m.mesesPendientes.length > 0 ? (
                         editIdx === i ? (
                           <div style={{ ...styles.payOptions, justifyContent: "flex-start" }}>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              style={styles.fileInput}
+                              onChange={(e) => onSelectComprobante(m.nombre, e.target.files?.[0] ?? null)}
+                            />
+                            {comprobanteByMember[m.nombre]?.nombre && (
+                              <span style={styles.fileName}>{comprobanteByMember[m.nombre]?.nombre}</span>
+                            )}
                             {m.mesesPendientes.map((mes) => {
                               const key = `${m.nombre}|${mes}`;
                               const isBusy = requesting.has(key);
@@ -778,6 +832,19 @@ const styles: Record<string, React.CSSProperties> = {
     transition: "all 0.2s",
   },
   payOptions: { display: "flex", gap: "4px", flexWrap: "wrap", justifyContent: "center", alignItems: "center" },
+  fileInput: {
+    maxWidth: "190px",
+    fontSize: "11px",
+    color: "#AAAAAA",
+  },
+  fileName: {
+    fontSize: "11px",
+    color: "#93c5fd",
+    maxWidth: "180px",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
   payMesBtn: {
     background: "#E50914",
     color: "#fff",
