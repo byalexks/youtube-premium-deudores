@@ -16,10 +16,40 @@ type AdminYearPayload = {
   pendientes: PagoPendiente[];
 };
 
+type MonthlyAccounting = {
+  mes: string;
+  esperado: number;
+  recaudado: number;
+  diferencia: number;
+};
+
+type MemberAccounting = {
+  nombre: string;
+  mesesPagados: number;
+  totalAportado: number;
+};
+
+const CUOTA = 13000;
+const MESES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
+
+const formatCOP = (value: number) =>
+  new Intl.NumberFormat("es-CO", {
+    style: "currency",
+    currency: "COP",
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  }).format(value);
+
+const parseMesLabel = (label: string) => {
+  const [mesRaw, yearRaw] = label.trim().split(/\s+/);
+  return { month: MESES.indexOf(mesRaw ?? ""), year: Number(yearRaw) };
+};
+
 async function apiGetAdminYear(year: number, token: string): Promise<AdminYearPayload> {
-  const res = await fetch(`/api/year/${year}?token=${encodeURIComponent(token)}`, {
+  const res = await fetch(`/api/year/${year}`, {
     method: "GET",
     cache: "no-store",
+    headers: { authorization: `Bearer ${token}` },
   });
   if (!res.ok) throw new Error("Failed to load admin data");
   return (await res.json()) as AdminYearPayload;
@@ -62,6 +92,48 @@ export default function AdminPage() {
     () => (data?.pendientes ?? []).filter((p) => p.status === "pending"),
     [data],
   );
+
+  const accounting = useMemo(() => {
+    const miembros = data?.miembros ?? [];
+    const approved = (data?.pendientes ?? []).filter((p) => p.status === "approved");
+    const byMonth = new Map<string, number>();
+    const byMember = new Map<string, number>();
+
+    approved.forEach((p) => {
+      const parsed = parseMesLabel(p.mes);
+      if (parsed.year !== year || parsed.month < 0) return;
+      byMonth.set(p.mes, (byMonth.get(p.mes) ?? 0) + 1);
+      byMember.set(p.nombre, (byMember.get(p.nombre) ?? 0) + 1);
+    });
+
+    const monthly: MonthlyAccounting[] = MESES.map((mes) => {
+      const label = `${mes} ${year}`;
+      const recaudado = (byMonth.get(label) ?? 0) * CUOTA;
+      const esperado = miembros.length * CUOTA;
+      return { mes: label, esperado, recaudado, diferencia: esperado - recaudado };
+    });
+
+    const members: MemberAccounting[] = miembros.map((m) => {
+      const mesesPagados = byMember.get(m.nombre) ?? 0;
+      return {
+        nombre: m.nombre,
+        mesesPagados,
+        totalAportado: mesesPagados * CUOTA,
+      };
+    });
+
+    const totalEsperado = monthly.reduce((sum, row) => sum + row.esperado, 0);
+    const totalRecaudado = monthly.reduce((sum, row) => sum + row.recaudado, 0);
+    const porcentajeCumplimiento = totalEsperado > 0 ? (totalRecaudado / totalEsperado) * 100 : 0;
+
+    return {
+      monthly,
+      members,
+      totalEsperado,
+      totalRecaudado,
+      porcentajeCumplimiento,
+    };
+  }, [data, year]);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -125,6 +197,36 @@ export default function AdminPage() {
     setBusyId(null);
     showToast("Rechazado");
     await reload().catch(() => undefined);
+  };
+
+  const exportAccountingCsv = () => {
+    const lines: string[] = [];
+    lines.push(["Resumen", String(year)].join(","));
+    lines.push(["Total esperado", String(accounting.totalEsperado)].join(","));
+    lines.push(["Total recaudado", String(accounting.totalRecaudado)].join(","));
+    lines.push(["Cumplimiento %", accounting.porcentajeCumplimiento.toFixed(2)].join(","));
+    lines.push("");
+    lines.push(["Tabla mensual"].join(","));
+    lines.push(["Mes", "Esperado", "Recaudado", "Diferencia"].join(","));
+    accounting.monthly.forEach((row) => {
+      lines.push([row.mes, String(row.esperado), String(row.recaudado), String(row.diferencia)].join(","));
+    });
+    lines.push("");
+    lines.push(["Tabla por miembro"].join(","));
+    lines.push(["Nombre", "Meses pagados", "Total aportado"].join(","));
+    accounting.members.forEach((row) => {
+      lines.push([row.nombre, String(row.mesesPagados), String(row.totalAportado)].join(","));
+    });
+
+    const blob = new Blob([`\ufeff${lines.join("\n")}`], { type: "text/csv;charset=utf-8;" });
+    const href = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = href;
+    a.download = `contabilidad-${year}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(href);
   };
 
   return (
@@ -219,6 +321,76 @@ export default function AdminPage() {
               ))}
             </div>
           )}
+        </div>
+
+        <div style={styles.section}>
+          <div style={styles.sectionHeader}>
+            <h2 style={styles.h2}>Contabilidad</h2>
+            <button style={styles.exportBtn} onClick={exportAccountingCsv} disabled={!token || loading}>
+              Exportar CSV
+            </button>
+          </div>
+
+          <div style={styles.kpis}>
+            <div style={styles.kpiCard}>
+              <span style={styles.kpiLabel}>Total esperado</span>
+              <span style={styles.kpiValue}>{formatCOP(accounting.totalEsperado)}</span>
+            </div>
+            <div style={styles.kpiCard}>
+              <span style={styles.kpiLabel}>Total recaudado</span>
+              <span style={styles.kpiValue}>{formatCOP(accounting.totalRecaudado)}</span>
+            </div>
+            <div style={styles.kpiCard}>
+              <span style={styles.kpiLabel}>Cumplimiento</span>
+              <span style={styles.kpiValue}>{accounting.porcentajeCumplimiento.toFixed(1)}%</span>
+            </div>
+          </div>
+
+          <div style={styles.tableWrap}>
+            <div style={styles.tableTitle}>Resumen mensual</div>
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  <th style={styles.th}>Mes</th>
+                  <th style={styles.th}>Esperado</th>
+                  <th style={styles.th}>Recaudado</th>
+                  <th style={styles.th}>Diferencia</th>
+                </tr>
+              </thead>
+              <tbody>
+                {accounting.monthly.map((row) => (
+                  <tr key={row.mes}>
+                    <td style={styles.td}>{row.mes}</td>
+                    <td style={styles.td}>{formatCOP(row.esperado)}</td>
+                    <td style={styles.td}>{formatCOP(row.recaudado)}</td>
+                    <td style={styles.td}>{formatCOP(row.diferencia)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={styles.tableWrap}>
+            <div style={styles.tableTitle}>Desglose por miembro</div>
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  <th style={styles.th}>Miembro</th>
+                  <th style={styles.th}>Meses pagados</th>
+                  <th style={styles.th}>Total aportado</th>
+                </tr>
+              </thead>
+              <tbody>
+                {accounting.members.map((row) => (
+                  <tr key={row.nombre}>
+                    <td style={styles.td}>{row.nombre}</td>
+                    <td style={styles.td}>{row.mesesPagados}</td>
+                    <td style={styles.td}>{formatCOP(row.totalAportado)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 
@@ -319,6 +491,63 @@ const styles: Record<string, React.CSSProperties> = {
   },
   btnApprove: { background: "#E50914", color: "#fff" },
   btnReject: { background: "rgba(245,158,11,0.18)", color: "#f59e0b", border: "1px solid rgba(245,158,11,0.25)" },
+  exportBtn: {
+    border: "1px solid rgba(255,255,255,0.14)",
+    borderRadius: "10px",
+    padding: "8px 10px",
+    background: "rgba(255,255,255,0.06)",
+    color: "#e6edf3",
+    cursor: "pointer",
+    fontWeight: 700,
+    fontSize: "12px",
+  },
+  kpis: {
+    marginTop: "12px",
+    display: "grid",
+    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+    gap: "10px",
+  },
+  kpiCard: {
+    border: "1px solid rgba(255,255,255,0.12)",
+    background: "rgba(255,255,255,0.05)",
+    borderRadius: "12px",
+    padding: "12px",
+    display: "flex",
+    flexDirection: "column",
+    gap: "6px",
+  },
+  kpiLabel: { color: "#AAAAAA", fontSize: "12px" },
+  kpiValue: { color: "#fff", fontSize: "18px", fontWeight: 700 },
+  tableWrap: {
+    marginTop: "12px",
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: "12px",
+    overflow: "hidden",
+    background: "rgba(0,0,0,0.2)",
+  },
+  tableTitle: {
+    fontSize: "12px",
+    color: "#AAAAAA",
+    padding: "10px 12px",
+    borderBottom: "1px solid rgba(255,255,255,0.1)",
+  },
+  table: {
+    width: "100%",
+    borderCollapse: "collapse",
+  },
+  th: {
+    textAlign: "left",
+    fontSize: "12px",
+    color: "#AAAAAA",
+    padding: "10px 12px",
+    borderBottom: "1px solid rgba(255,255,255,0.08)",
+  },
+  td: {
+    fontSize: "13px",
+    color: "#e6edf3",
+    padding: "10px 12px",
+    borderBottom: "1px solid rgba(255,255,255,0.06)",
+  },
   toast: {
     position: "fixed",
     bottom: "24px",
