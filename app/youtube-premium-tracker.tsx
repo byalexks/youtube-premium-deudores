@@ -4,8 +4,10 @@ import { useEffect, useMemo, useState } from "react";
 
 const CUOTA = 13000;
 
-type Miembro = { nombre: string; ultimoPago: string };
-type YearPayload = { miembros: Miembro[] };
+type PagoPendienteStatus = "pending" | "approved" | "rejected";
+type PagoPendiente = { id: string; nombre: string; mes: string; createdAt: string; status: PagoPendienteStatus };
+type Miembro = { nombre: string; ultimoPago: string; telefono: string };
+type YearPayload = { miembros: Miembro[]; pendientes?: PagoPendiente[] };
 
 const getMesLabel = (year: number, month: number) => {
   const nombres = [
@@ -64,11 +66,6 @@ const parseMesLabel = (label: string) => {
   return { month: nombres.indexOf(parts[0] ?? ""), year: parseInt(parts[1] ?? "") };
 };
 
-const mesLabelToIndex = (label: string) => {
-  const { year, month } = parseMesLabel(label);
-  return year * 12 + month;
-};
-
 const calcularPendientes = (ultimoPago: string, currentYear: number, currentMonth: number) => {
   const { year: upYear, month: upMonth } = parseMesLabel(ultimoPago);
 
@@ -87,11 +84,11 @@ const calcularPendientes = (ultimoPago: string, currentYear: number, currentMont
 };
 
 const INITIAL_DATA: Miembro[] = [
-  { nombre: "MAGB MAIKOLCHIS", ultimoPago: "Mar 2025" },
-  { nombre: "Arianis Arrieta", ultimoPago: "Mar 2025" },
-  { nombre: "Dylan Batista", ultimoPago: "Mar 2025" },
-  { nombre: "Michael Martinez", ultimoPago: "Mar 2026" },
-  { nombre: "Wendy Ortega", ultimoPago: "Mar 2026" },
+  { nombre: "MAGB MAIKOLCHIS", ultimoPago: "Mar 2025", telefono: "" },
+  { nombre: "Arianis Arrieta", ultimoPago: "Mar 2025", telefono: "" },
+  { nombre: "Dylan Batista", ultimoPago: "Mar 2025", telefono: "" },
+  { nombre: "Michael Martinez", ultimoPago: "Mar 2026", telefono: "" },
+  { nombre: "Wendy Ortega", ultimoPago: "Mar 2026", telefono: "" },
 ];
 
 const formatCOP = (v: number) =>
@@ -106,6 +103,13 @@ async function apiGetYear(year: number): Promise<YearPayload> {
   const res = await fetch(`/api/year/${year}`, { method: "GET" });
   if (!res.ok) throw new Error(`GET /api/year/${year} failed`);
   return (await res.json()) as YearPayload;
+}
+
+async function apiGetHistory(year: number, nombre: string): Promise<PagoPendiente[]> {
+  const res = await fetch(`/api/history?year=${year}&nombre=${encodeURIComponent(nombre)}`, { method: "GET" });
+  if (!res.ok) throw new Error("GET /api/history failed");
+  const payload = (await res.json()) as { history?: PagoPendiente[] };
+  return Array.isArray(payload.history) ? payload.history : [];
 }
 
 async function apiRequestPayment(payload: { year: number; nombre: string; mes: string }) {
@@ -133,6 +137,9 @@ const COL_FR: Record<ColKey, string> = {
 export default function YoutubePremiumTracker() {
   const [miembros, setMiembros] = useState<Miembro[]>(INITIAL_DATA);
   const [showWhatsApp, setShowWhatsApp] = useState(false);
+  const [selectedYear, setSelectedYear] = useState<number>(() => new Date().getFullYear());
+  const [historyMember, setHistoryMember] = useState<string>("");
+  const [historyData, setHistoryData] = useState<PagoPendiente[]>([]);
   const [toast, setToast] = useState<string | null>(null);
   const [editIdx, setEditIdx] = useState<number | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -143,14 +150,18 @@ export default function YoutubePremiumTracker() {
     if (col === "nombre" || col === "accion") return;
     setVisibleCols((prev) => {
       const next = new Set(prev);
-      next.has(col) ? next.delete(col) : next.add(col);
+      if (next.has(col)) {
+        next.delete(col);
+      } else {
+        next.add(col);
+      }
       return next;
     });
   };
   const gridTemplate = ALL_COLS.filter((c) => visibleCols.has(c)).map((c) => COL_FR[c]).join(" ");
 
   const now = new Date();
-  const year = now.getFullYear();
+  const year = selectedYear;
   const currentMonth = now.getMonth();
   const mesCorte = getMesLabel(year, currentMonth);
 
@@ -178,6 +189,37 @@ export default function YoutubePremiumTracker() {
       cancelled = true;
     };
   }, [year]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const qYear = Number(params.get("year"));
+    if (Number.isFinite(qYear) && qYear > 2000) setSelectedYear(qYear);
+  }, []);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("year", String(selectedYear));
+    window.history.replaceState({}, "", url.toString());
+  }, [selectedYear]);
+
+  useEffect(() => {
+    if (!historyMember) {
+      setHistoryData([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const next = await apiGetHistory(selectedYear, historyMember);
+        if (!cancelled) setHistoryData(next);
+      } catch {
+        if (!cancelled) setHistoryData([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [historyMember, selectedYear]);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -290,6 +332,15 @@ export default function YoutubePremiumTracker() {
             </div>
           </div>
           <div style={styles.headerRight}>
+            <label style={styles.yearLabel}>
+              Año
+              <input
+                type="number"
+                style={styles.yearInput}
+                value={selectedYear}
+                onChange={(e) => setSelectedYear(Number(e.target.value))}
+              />
+            </label>
             <div style={styles.autoTag}>⚡ Online (KV)</div>
             <button onClick={resetData} style={styles.resetBtn} title="Reiniciar datos">
               ↺
@@ -515,6 +566,39 @@ export default function YoutubePremiumTracker() {
         )}
       </div>
 
+      <div style={styles.historySection}>
+        <div style={styles.historyHeader}>
+          <h3 style={styles.historyTitle}>Historial por miembro</h3>
+          <select
+            value={historyMember}
+            onChange={(e) => setHistoryMember(e.target.value)}
+            style={styles.historySelect}
+          >
+            <option value="">Selecciona un miembro</option>
+            {miembros.map((m) => (
+              <option key={m.nombre} value={m.nombre}>{m.nombre}</option>
+            ))}
+          </select>
+        </div>
+        {historyMember ? (
+          historyData.length > 0 ? (
+            <div style={styles.historyList}>
+              {historyData.map((h) => (
+                <div key={h.id} style={styles.historyItem}>
+                  <span style={styles.historyMes}>{h.mes}</span>
+                  <span style={styles.historyStatus}>{h.status}</span>
+                  <span style={styles.historyDate}>{new Date(h.createdAt).toLocaleString()}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={styles.historyEmpty}>Sin movimientos para este miembro en {selectedYear}.</div>
+          )
+        ) : (
+          <div style={styles.historyEmpty}>Selecciona un miembro para ver su historial.</div>
+        )}
+      </div>
+
       {toast && <div style={styles.toast}>{toast}</div>}
     </div>
   );
@@ -565,6 +649,15 @@ const styles: Record<string, React.CSSProperties> = {
   },
   subtitle: { fontSize: "13px", color: "#AAAAAA", marginTop: "2px" },
   headerRight: { display: "flex", alignItems: "center", gap: "8px" },
+  yearLabel: { display: "flex", flexDirection: "column", gap: "4px", fontSize: "11px", color: "#AAAAAA" },
+  yearInput: {
+    width: "100px",
+    background: "rgba(0,0,0,0.35)",
+    border: "1px solid rgba(255,255,255,0.14)",
+    borderRadius: "8px",
+    color: "#f1f1f1",
+    padding: "6px 8px",
+  },
   autoTag: {
     background: "rgba(229,9,20,0.12)",
     color: "#E50914",
@@ -749,6 +842,45 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer",
     width: "100%",
   },
+  historySection: {
+    background: "rgba(255,255,255,0.05)",
+    borderRadius: "14px",
+    border: "1px solid rgba(255,255,255,0.10)",
+    marginBottom: "20px",
+    padding: "14px",
+  },
+  historyHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px" },
+  historyTitle: { fontSize: "15px", fontWeight: 600, color: "#fff" },
+  historySelect: {
+    minWidth: "220px",
+    background: "rgba(0,0,0,0.35)",
+    border: "1px solid rgba(255,255,255,0.14)",
+    borderRadius: "8px",
+    color: "#f1f1f1",
+    padding: "8px 10px",
+  },
+  historyList: { display: "flex", flexDirection: "column", gap: "8px", marginTop: "12px" },
+  historyItem: {
+    display: "grid",
+    gridTemplateColumns: "1fr auto auto",
+    gap: "10px",
+    alignItems: "center",
+    background: "rgba(255,255,255,0.06)",
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: "10px",
+    padding: "10px 12px",
+  },
+  historyMes: { fontSize: "13px", color: "#fff", fontWeight: 600 },
+  historyStatus: {
+    fontSize: "12px",
+    color: "#E50914",
+    background: "rgba(229,9,20,0.15)",
+    borderRadius: "999px",
+    padding: "4px 8px",
+    textTransform: "uppercase",
+  },
+  historyDate: { fontSize: "12px", color: "#AAAAAA" },
+  historyEmpty: { marginTop: "12px", fontSize: "13px", color: "#AAAAAA" },
   toast: {
     position: "fixed",
     bottom: "24px",
