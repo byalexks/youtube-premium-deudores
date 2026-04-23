@@ -9,6 +9,8 @@ type PagoPendiente = {
   mes: string;
   createdAt: string;
   status: PagoPendienteStatus;
+  comprobanteUrl?: string;
+  comprobanteNombre?: string;
 };
 
 type Miembro = { nombre: string; ultimoPago: string; telefono: string };
@@ -32,6 +34,17 @@ type MemberAccounting = {
 };
 
 type PhoneUpdatePayload = { ok: boolean; miembro: Miembro };
+type CorteConfig = { day: number; destino: string };
+type CorteSnapshot = {
+  year: number;
+  generatedAt: string;
+  corteMes: string;
+  totalDeuda: number;
+  morosos: Array<{ nombre: string; meses: string[]; total: number }>;
+  message: string;
+};
+
+type CortePayload = { config: CorteConfig; snapshot: CorteSnapshot | null };
 
 const CUOTA = 13000;
 const MESES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
@@ -116,6 +129,50 @@ async function apiUpdatePhone(year: number, nombre: string, telefono: string, to
   return (await res.json()) as PhoneUpdatePayload;
 }
 
+type MemberMutateAction = "add" | "update" | "delete";
+
+async function apiMutateMember(params: {
+  action: MemberMutateAction;
+  year: number;
+  token: string;
+  originalNombre?: string;
+  miembro?: Miembro;
+}) {
+  const res = await fetch("/api/admin/members", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) throw new Error("Member mutation failed");
+}
+
+async function apiGetCorte(token: string): Promise<CortePayload> {
+  const res = await fetch("/api/admin/corte", {
+    method: "GET",
+    headers: { authorization: `Bearer ${token}` },
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("Corte fetch failed");
+  return (await res.json()) as CortePayload;
+}
+
+async function apiSaveCorteConfig(params: {
+  token: string;
+  day: number;
+  destino: string;
+  forceGenerate?: boolean;
+  year?: number;
+  month?: number;
+}) {
+  const res = await fetch("/api/admin/corte", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) throw new Error("Corte save failed");
+  return (await res.json()) as { config: CorteConfig; snapshot?: CorteSnapshot };
+}
+
 export default function AdminPage() {
   const [token, setToken] = useState<string>("");
   const [year, setYear] = useState<number>(() => new Date().getFullYear());
@@ -126,6 +183,13 @@ export default function AdminPage() {
   const [editingPhone, setEditingPhone] = useState<Record<string, string>>({});
   const [savingPhoneName, setSavingPhoneName] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [newMember, setNewMember] = useState<Miembro>({ nombre: "", ultimoPago: getMesLabel(year, new Date().getMonth()), telefono: "" });
+  const [editingMemberName, setEditingMemberName] = useState<string | null>(null);
+  const [editingMembers, setEditingMembers] = useState<Record<string, Miembro>>({});
+  const [savingMember, setSavingMember] = useState<string | null>(null);
+  const [corteConfig, setCorteConfig] = useState<CorteConfig>({ day: 5, destino: "" });
+  const [corteSnapshot, setCorteSnapshot] = useState<CorteSnapshot | null>(null);
+  const [savingCorte, setSavingCorte] = useState(false);
   const reloadRef = useRef<() => Promise<void>>(async () => undefined);
 
   useEffect(() => {
@@ -198,6 +262,13 @@ export default function AdminPage() {
       });
       return next;
     });
+    setEditingMembers((prev) => {
+      const next: Record<string, Miembro> = { ...prev };
+      data.miembros.forEach((m) => {
+        next[m.nombre] = next[m.nombre] ?? { ...m };
+      });
+      return next;
+    });
   }, [data]);
 
   const showToast = (msg: string) => {
@@ -212,8 +283,13 @@ export default function AdminPage() {
     }
     try {
       setLoading(true);
-      const next = await apiGetAdminYear(year, token);
+      const [next, corte] = await Promise.all([
+        apiGetAdminYear(year, token),
+        apiGetCorte(token),
+      ]);
       setData(next);
+      setCorteConfig(corte.config);
+      setCorteSnapshot(corte.snapshot);
       setLastUpdated(new Date());
     } catch {
       setData(null);
@@ -292,6 +368,108 @@ export default function AdminPage() {
     const total = meses.length * CUOTA;
     const texto = `Hola ${miembro.nombre}, te recordamos los meses pendientes: ${meses.join(", ")}. Total adeudado: ${formatCOP(total)}. Gracias.`;
     window.open(`https://wa.me/${telefono}?text=${encodeURIComponent(texto)}`, "_blank");
+  };
+
+  const onAddMember = async () => {
+    if (!token) return;
+    const payload = {
+      nombre: newMember.nombre.trim(),
+      ultimoPago: newMember.ultimoPago.trim(),
+      telefono: (newMember.telefono ?? "").replace(/[^0-9]/g, ""),
+    };
+    if (!payload.nombre || !payload.ultimoPago) {
+      showToast("Completa nombre y último pago");
+      return;
+    }
+    setSavingMember("__new__");
+    try {
+      await apiMutateMember({ action: "add", year, token, miembro: payload });
+      setNewMember({ nombre: "", ultimoPago: getMesLabel(year, new Date().getMonth()), telefono: "" });
+      showToast("Miembro agregado");
+      await reload();
+    } catch {
+      showToast("Error agregando miembro");
+    } finally {
+      setSavingMember(null);
+    }
+  };
+
+  const onSaveMember = async (originalNombre: string) => {
+    if (!token) return;
+    const current = editingMembers[originalNombre];
+    if (!current || !current.nombre.trim() || !current.ultimoPago.trim()) {
+      showToast("Datos inválidos de miembro");
+      return;
+    }
+    setSavingMember(originalNombre);
+    try {
+      await apiMutateMember({
+        action: "update",
+        year,
+        token,
+        originalNombre,
+        miembro: {
+          nombre: current.nombre.trim(),
+          ultimoPago: current.ultimoPago.trim(),
+          telefono: (current.telefono ?? "").replace(/[^0-9]/g, ""),
+        },
+      });
+      setEditingMemberName(null);
+      showToast("Miembro actualizado");
+      await reload();
+    } catch {
+      showToast("Error actualizando miembro");
+    } finally {
+      setSavingMember(null);
+    }
+  };
+
+  const onDeleteMember = async (nombre: string) => {
+    if (!token) return;
+    if (!window.confirm(`Eliminar miembro ${nombre}?`)) return;
+    setSavingMember(nombre);
+    try {
+      await apiMutateMember({ action: "delete", year, token, originalNombre: nombre });
+      showToast("Miembro eliminado");
+      await reload();
+    } catch {
+      showToast("Error eliminando miembro");
+    } finally {
+      setSavingMember(null);
+    }
+  };
+
+  const onSaveCorte = async (forceGenerate: boolean) => {
+    if (!token) return;
+    setSavingCorte(true);
+    try {
+      const res = await apiSaveCorteConfig({
+        token,
+        day: corteConfig.day,
+        destino: corteConfig.destino,
+        forceGenerate,
+        year,
+        month: new Date().getMonth(),
+      });
+      setCorteConfig(res.config);
+      if (res.snapshot) setCorteSnapshot(res.snapshot);
+      showToast(forceGenerate ? "Corte generado" : "Configuración de corte guardada");
+      if (!res.snapshot) await reload();
+    } catch {
+      showToast("Error guardando corte");
+    } finally {
+      setSavingCorte(false);
+    }
+  };
+
+  const openCorteWhatsApp = () => {
+    if (!corteSnapshot) return;
+    const destino = (corteConfig.destino ?? "").replace(/[^0-9]/g, "");
+    if (!destino) {
+      showToast("Configura el número destino");
+      return;
+    }
+    window.open(`https://wa.me/${destino}?text=${encodeURIComponent(corteSnapshot.message)}`, "_blank");
   };
 
   const exportAccountingCsv = () => {
@@ -394,6 +572,11 @@ export default function AdminPage() {
                     <div style={styles.itemMeta}>
                       Mes: <b>{p.mes}</b> · {new Date(p.createdAt).toLocaleString()}
                     </div>
+                    {p.comprobanteUrl && (
+                      <a href={p.comprobanteUrl} target="_blank" rel="noreferrer" style={styles.itemLink}>
+                        Ver comprobante{p.comprobanteNombre ? `: ${p.comprobanteNombre}` : ""}
+                      </a>
+                    )}
                     <div style={styles.itemId}>id: {p.id}</div>
                   </div>
                   <div className="adm-actions">
@@ -461,6 +644,180 @@ export default function AdminPage() {
               );
             })}
           </div>
+        </div>
+
+        <div style={styles.section}>
+          <div style={styles.sectionHeader}>
+            <h2 style={styles.h2}>Gestión de miembros</h2>
+          </div>
+
+          <div style={styles.memberFormGrid}>
+            <input
+              style={styles.input}
+              value={newMember.nombre}
+              onChange={(e) => setNewMember((prev) => ({ ...prev, nombre: e.target.value }))}
+              placeholder="Nombre"
+            />
+            <input
+              style={styles.input}
+              value={newMember.ultimoPago}
+              onChange={(e) => setNewMember((prev) => ({ ...prev, ultimoPago: e.target.value }))}
+              placeholder="Último pago (Ej: Mar 2026)"
+            />
+            <input
+              style={styles.input}
+              value={newMember.telefono}
+              onChange={(e) => setNewMember((prev) => ({ ...prev, telefono: e.target.value }))}
+              placeholder="Teléfono"
+            />
+            <button
+              style={{ ...styles.btn, ...styles.btnSave }}
+              onClick={() => void onAddMember()}
+              disabled={savingMember === "__new__" || loading}
+            >
+              {savingMember === "__new__" ? "..." : "Agregar"}
+            </button>
+          </div>
+
+          <div style={styles.list}>
+            {(data?.miembros ?? []).map((m) => {
+              const isEditing = editingMemberName === m.nombre;
+              const editing = editingMembers[m.nombre] ?? m;
+              return (
+                <div key={m.nombre} className="adm-item">
+                  <div style={{ ...styles.itemMain, width: "100%" }}>
+                    {isEditing ? (
+                      <div style={styles.memberEditGrid}>
+                        <input
+                          style={styles.input}
+                          value={editing.nombre}
+                          onChange={(e) => setEditingMembers((prev) => ({
+                            ...prev,
+                            [m.nombre]: { ...editing, nombre: e.target.value },
+                          }))}
+                        />
+                        <input
+                          style={styles.input}
+                          value={editing.ultimoPago}
+                          onChange={(e) => setEditingMembers((prev) => ({
+                            ...prev,
+                            [m.nombre]: { ...editing, ultimoPago: e.target.value },
+                          }))}
+                        />
+                        <input
+                          style={styles.input}
+                          value={editing.telefono}
+                          onChange={(e) => setEditingMembers((prev) => ({
+                            ...prev,
+                            [m.nombre]: { ...editing, telefono: e.target.value },
+                          }))}
+                        />
+                      </div>
+                    ) : (
+                      <>
+                        <div style={styles.itemName}>{m.nombre}</div>
+                        <div style={styles.itemMeta}>Último pago: {m.ultimoPago}</div>
+                        <div style={styles.itemMeta}>Teléfono: {m.telefono || "—"}</div>
+                      </>
+                    )}
+                  </div>
+                  <div className="adm-actions">
+                    {isEditing ? (
+                      <>
+                        <button
+                          style={{ ...styles.btn, ...styles.btnSave }}
+                          onClick={() => void onSaveMember(m.nombre)}
+                          disabled={savingMember === m.nombre || loading}
+                        >
+                          {savingMember === m.nombre ? "..." : "Guardar"}
+                        </button>
+                        <button
+                          style={{ ...styles.btn, ...styles.btnReject }}
+                          onClick={() => setEditingMemberName(null)}
+                          disabled={savingMember === m.nombre || loading}
+                        >
+                          Cancelar
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          style={{ ...styles.btn, ...styles.btnSave }}
+                          onClick={() => setEditingMemberName(m.nombre)}
+                          disabled={loading}
+                        >
+                          Editar
+                        </button>
+                        <button
+                          style={{ ...styles.btn, ...styles.btnReject }}
+                          onClick={() => void onDeleteMember(m.nombre)}
+                          disabled={savingMember === m.nombre || loading}
+                        >
+                          {savingMember === m.nombre ? "..." : "Eliminar"}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div style={styles.section}>
+          <div style={styles.sectionHeader}>
+            <h2 style={styles.h2}>Corte automático</h2>
+          </div>
+          <div style={styles.memberFormGrid}>
+            <label style={styles.label}>
+              Día de corte
+              <input
+                style={styles.input}
+                type="number"
+                min={1}
+                max={31}
+                value={corteConfig.day}
+                onChange={(e) => setCorteConfig((prev) => ({ ...prev, day: Number(e.target.value) }))}
+              />
+            </label>
+            <label style={styles.label}>
+              WhatsApp destino
+              <input
+                style={styles.input}
+                value={corteConfig.destino}
+                onChange={(e) => setCorteConfig((prev) => ({ ...prev, destino: e.target.value }))}
+                placeholder="573001112233"
+              />
+            </label>
+            <button
+              style={{ ...styles.btn, ...styles.btnSave }}
+              onClick={() => void onSaveCorte(false)}
+              disabled={savingCorte || loading}
+            >
+              {savingCorte ? "..." : "Guardar configuración"}
+            </button>
+            <button
+              style={{ ...styles.btn, ...styles.btnWarn }}
+              onClick={() => void onSaveCorte(true)}
+              disabled={savingCorte || loading}
+            >
+              {savingCorte ? "..." : "Generar ahora"}
+            </button>
+          </div>
+
+          {corteSnapshot ? (
+            <div style={styles.corteBox}>
+              <div style={styles.itemMeta}>Último corte: {new Date(corteSnapshot.generatedAt).toLocaleString()}</div>
+              <div style={styles.itemMeta}>Periodo: {corteSnapshot.corteMes}</div>
+              <div style={styles.itemMeta}>Total adeudado: {formatCOP(corteSnapshot.totalDeuda)}</div>
+              <pre style={styles.cortePre}>{corteSnapshot.message}</pre>
+              <button style={{ ...styles.btn, ...styles.btnWarn }} onClick={openCorteWhatsApp} disabled={loading}>
+                Abrir WhatsApp
+              </button>
+            </div>
+          ) : (
+            <div style={styles.empty}>Aún no se ha generado un corte automático.</div>
+          )}
         </div>
 
         <div style={styles.section}>
@@ -619,6 +976,7 @@ const styles: Record<string, React.CSSProperties> = {
   itemMain: { display: "flex", flexDirection: "column", gap: "4px" },
   itemName: { fontSize: "15px", fontWeight: 700 },
   itemMeta: { fontSize: "12px", color: "#AAAAAA" },
+  itemLink: { fontSize: "12px", color: "#93c5fd", textDecoration: "underline" },
   itemId: { fontSize: "11px", color: "#909090" },
   actions: { display: "flex", gap: "8px", alignItems: "center" },
   btn: {
@@ -641,6 +999,37 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#e6edf3",
     outline: "none",
     minWidth: "150px",
+  },
+  memberFormGrid: {
+    marginTop: "12px",
+    display: "grid",
+    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+    gap: "10px",
+  },
+  memberEditGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+    gap: "8px",
+  },
+  corteBox: {
+    marginTop: "12px",
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: "12px",
+    padding: "12px",
+    background: "rgba(255,255,255,0.04)",
+    display: "flex",
+    flexDirection: "column",
+    gap: "8px",
+  },
+  cortePre: {
+    margin: 0,
+    whiteSpace: "pre-wrap",
+    background: "rgba(0,0,0,0.3)",
+    borderRadius: "10px",
+    padding: "10px",
+    fontSize: "12px",
+    lineHeight: 1.5,
+    color: "#e6edf3",
   },
   exportBtn: {
     border: "1px solid rgba(255,255,255,0.14)",
